@@ -8,7 +8,9 @@ Ki = 0.001
 Kd = 0.05
 
 base_speed = 100
-max_speed = 100
+max_speed = 50
+robot_state = "tracking_blue"
+blue_lost_time = None
 
 prev_error_x = 0
 prev_error_y = 0
@@ -32,8 +34,10 @@ GPIO.setup(IN2, GPIO.OUT)
 GPIO.setup(IN3, GPIO.OUT)
 GPIO.setup(IN4, GPIO.OUT)
 
-pwm_left = GPIO.PWM(ENA, 1000)
-pwm_right = GPIO.PWM(ENB, 1000)
+freq = 100
+
+pwm_left = GPIO.PWM(ENA, freq)
+pwm_right = GPIO.PWM(ENB, freq)
 pwm_left.start(0)
 pwm_right.start(0)
 
@@ -113,14 +117,16 @@ def move_to_point(center_between):
     U_x = (Kp * error_x + Ki * integral_x + Kd * d_error_x)
     U_y = (Kp * error_y + Ki * integral_y + Kd * d_error_y)
     
+    U_x = max(min(U_x, 30), -30)
+    
     prev_error_x = error_x
     prev_error_y = error_y
     
     motor_left = base_speed + U_x
     motor_right = base_speed - U_x
     
-    motor_left = max(0, min(max_speed, motor_left))
-    motor_right = max(0, min(max_speed, motor_right))
+    motor_left = max(-100, min(max_speed, motor_left))
+    motor_right = max(-100, min(max_speed, motor_right))
     
     print(f"PID terms - P: {Kp*error_x:.2f}, I: {Ki*integral_x:.2f}, D: {Kd*d_error_x:.2f}")
     print(f"Left Motor: {motor_left}%, Right Motor: {motor_right}%")
@@ -143,6 +149,39 @@ def process_frame(frame):
     green_contours, green_centers = find_contours_and_centers(hsv, green_lower, green_upper)
     yellow_contours, yellow_centers = find_contours_and_centers(hsv, yellow_lower, yellow_upper)
     blue_contours, blue_centers = find_contours_and_centers(hsv, blue_lower, blue_upper)
+    
+    global robot_state, blue_lost_time
+    if robot_state == "tracking_blue":
+        if blue_centers:
+            print("Tracking blue object on the left")
+            target_point = (0, blue_centers[0][1])
+            move_to_point(target_point)
+        else:
+            print("Blue lost - stop and start forward timer")
+
+            global prev_error_x, integral_x
+            prev_error_x = 0
+            integral_x = 0
+
+            set_motor_speeds(0, 0)
+            time.sleep(0.2)
+
+            blue_lost_time = time.time()
+            robot_state = "move_forward_after_lost"
+    
+    elif robot_state == "move_forward_after_lost":
+        if time.time() - blue_lost_time < 1:
+            print("Moving forward for 1 seconds")
+            set_motor_speeds(base_speed, base_speed)
+        else:
+            print("Start turning left")
+            robot_state = "turning_left"
+
+    elif robot_state == "turning_left":
+        set_motor_speeds(-base_speed, base_speed)
+        if blue_centers:
+            print("Blue found again - resuming tracking")
+            robot_state = "tracking_blue"
 
     for contours, centers, color in zip(
         [green_contours, yellow_contours, blue_contours],
@@ -156,6 +195,7 @@ def process_frame(frame):
                 cv2.circle(frame, center, 5, color, -1)
                 cv2.putText(frame, f"Center: {center}", (center[0] + 10, center[1]), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
 
     if len(yellow_centers) >= 2:
         largest_yellow_contours = sorted(yellow_contours, key=cv2.contourArea, reverse=True)[:2]
